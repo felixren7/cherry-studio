@@ -73,33 +73,36 @@ export function submit(host: RunHost, thread: ThreadState, key: string, input: T
 }
 
 /**
- * H3: a running child takes the message at its next boundary; an idle one starts a run with it, unless it steers `run`
- * or `ownerAborted` says the call that owns the child's first run has aborted.
+ * H3: an idle child starts run `run` with the message when every run it started is below `run`, unless `ownerAborted`
+ * says the call that owns the child's first run has aborted; otherwise the message steers run `run`, which a running
+ * child takes at its next boundary.
  */
 export function message(
   host: RunHost,
   thread: ThreadState,
   input: TurnInput,
   key: string,
-  run?: number,
+  run: number,
   ownerAborted = false
 ): MessageResult {
   const existing = thread.submissions.get(key)
   if (existing) return existing.admission as MessageResult
   const active = thread.active
-  if (run !== undefined ? active?.run !== run : !active && ownerAborted) {
-    const withdrawn: MessageResult = { run: run ?? thread.runs + 1, status: 'withdrawn' }
+  const starts = !active && run > thread.runs
+  // A steer names a run that ran; an idle child's number that never did was skipped, and is not reused.
+  if (!active && !starts && !thread.ends.has(run))
+    throw new Error(`Run ${run} of ${thread.id} never started and cannot start now; its runs reached ${thread.runs}`)
+  if (starts ? ownerAborted : active?.run !== run) {
+    const withdrawn: MessageResult = { run, status: 'withdrawn' }
     thread.submissions.set(key, { input, admission: withdrawn, state: 'withdrawn' })
     return withdrawn
   }
-  const admission: MessageResult = active
-    ? { run: active.run, status: 'queued' }
-    : { run: thread.runs + 1, status: 'started' }
+  const admission: MessageResult = { run, status: starts ? 'started' : 'queued' }
   thread.submissions.set(key, { input, admission, state: 'queued' })
-  if (active) thread.steer.push(key)
+  if (!starts) thread.steer.push(key)
   else {
     answerOpenCalls(host.state, thread)
-    startRun(host, thread, key)
+    startRun(host, thread, key, run)
   }
   return admission
 }
@@ -184,8 +187,9 @@ function drain(host: RunHost, thread: ThreadState): void {
   if (next !== undefined) startRun(host, thread, next)
 }
 
-function startRun(host: RunHost, thread: ThreadState, key: string): void {
-  thread.runs += 1
+/** Starts the run as `run`; the numbers it skips count zero usage, since usage is summed per run up to `thread.runs`. */
+function startRun(host: RunHost, thread: ThreadState, key: string, run = thread.runs + 1): void {
+  thread.runs = run
   const goalRound = thread.submissions.get(key)!.input.kind === ENTRY_KINDS.goalRound
   thread.active = { run: thread.runs, goalRound, requests: 0 }
   appendInput(host.state, thread, key)

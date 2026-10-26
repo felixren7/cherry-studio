@@ -10,9 +10,12 @@ import {
   holds,
   key,
   latch,
+  markersWith,
+  message,
   noticeTexts,
   read,
   reply,
+  spawnBackground,
   status,
   step,
   toolBase,
@@ -175,6 +178,19 @@ describe('fake harness', () => {
         )
       )
     ).rejects.toThrow()
+  })
+
+  // Catches two runs sharing one identity (H3): a first input naming a number the child skipped would start a run
+  // under a number the package already ended without starting it.
+  it('throws for a first input that names a run number the child skipped', async () => {
+    const fake = createFakeHarness()
+    const t = await fake.createThread()
+    const child = await spawnBackground(fake, t, 'skip')
+    fake.script(child, [reply('two'), reply('never')])
+    await fake.withCall(t, (p) => p.helpers.message(child, message('two'), key('skip-2'), 2))
+    await fake.settle()
+    await expect(fake.withCall(t, (p) => p.helpers.message(child, message('one'), key('skip-1'), 1))).rejects.toThrow()
+    expect(markersWith(await read(fake, child), key('skip-1'))).toEqual([])
   })
 
   // Catches real time leaking into fixtures, which would make Stage B's replay comparisons flaky.

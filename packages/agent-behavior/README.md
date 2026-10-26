@@ -58,7 +58,7 @@ are named as a verb and an object and carry no harness noun (hook, commit, sessi
 | --- | --------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | H1  | `Ledger`        | `read`, `transact`, `modelContext` | Read a conversation's facts, decide, and commit the writes the decision asks for, together.               |
 | H2  | `Turns`         | `start`, `retract`, `stop`         | Give the agent a turn under a request key, take back one that has not started, stop the current one or only the one a stop names. |
-| H3  | `Helpers`       | `message`, `awaitAnswer`, `stop`   | Message a child, wait for the answer of one of its runs, stop that run if it is still the child's active run; a first input the owning tool call sends after it aborted starts nothing. |
+| H3  | `Helpers`       | `message`, `awaitAnswer`, `stop`   | Message a child, starting a run under the number the package recorded for it (the run's only identity), wait for the answer of one of its runs, stop that run if it is still the child's active run; a first input the owning tool call sends after it aborted starts nothing. |
 | H4  | `Jobs`          | `register`                         | Finish what a call started after it returns, across restarts.                                             |
 | H5  | `Waits`         | `untilIdle`, `untilDone`           | Wait until a conversation has no run, or until an input submitted under a key has run to its end; waiting keeps no state. |
 | H6  | `Memory`        | `remember`                         | Remember an answer from a person or a model so a restart never asks again.                                |
@@ -297,7 +297,10 @@ first run is recorded as stopped by the user.
 `message_subagent` refuses the same way to continue a finished child, and refuses a steer only once the signal aborted.
 
 A finished child continues on the same native Thread and id: `message_subagent` increments its run number,
-starts the next run in the background and reports that run's result once. The completed foreground run's cancellation
+starts the next run in the background and reports that run's result once. The number the package records is the
+run's only identity, and the harness starts the run under it: a recorded run that ended before any input reached it
+(a stop before its first input, or a reopen) keeps its number, which no later run reuses, and the next run starts
+past it. The completed foreground run's cancellation
 ownership ends with it; stopping its parent cannot stop the later background run. `parentToolCallId` records origin
 only, so neither messaging nor stopping redirects to another child with the same tool origin. Explicit `fork` remains
 a separate operation that creates a new child. The shared contract tests continuation history and run identity,
@@ -361,8 +364,14 @@ Beyond [What the adapters provide](#what-the-adapters-provide), each adapter mus
 - Ask `onCompacting` before every compaction, under the key the `CompactionRequest.key` TSDoc names for the harness, and
   pass the verdict through; meter a compaction during a run as one of its requests. Never call `Summarizer` itself.
 - Pass each tool call's turn abort signal to `GateHandlers.before` as `call.signal`, and withdraw a steer that misses
-  its run, or whose tool call aborts first (`Helpers.message` called with `run` answers `withdrawn`; the key
+  its run, or whose tool call aborts first (`Helpers.message` answers `withdrawn`; the key
   `subagent-steer:<callKey>:<run>` is spent), instead of carrying it into the next run or holding the stopped turn.
+- Start each child run under the number `Helpers.message` names, never by a count of its own: `run` is above every
+  run the child started, each number it skips gets a zero entry in `ChildFacts.runUsage`, and `Helpers.stop` and
+  `Helpers.awaitAnswer` then reach the run the package recorded. A number an idle child skipped is a programming error:
+  `message` throws (H3; the cases
+  `stopping a background child before its first input, then continuing it, keeps run identities aligned` and
+  `run usage gives each run number a child skipped a zero entry`).
 - Withdraw a foreground child's first input when the tool call that owns the child's first run sends it after that
   call aborted: `Helpers.message` answers `withdrawn` and starts nothing, because the stop may have passed the child
   while it had no run (H3; the case `a foreground child whose owning call aborted before its first input never runs`).
@@ -455,6 +464,9 @@ A compaction keeps the summary `onCompacting` accepted with its entry, across re
 context (`ledger.modelContext`, each model request, the next `CompactionRequest.messages`) then starts with that
 summary, followed by the entries after it.
 
+A message that starts a child run starts it as the run it names, and the numbers it skips count zero usage in
+`ChildFacts.runUsage`.
+
 `restart()` loses what a Durable restart loses (handlers, run loops, running jobs, waiters) and keeps what it keeps
 (entries, submissions, memo, the job table, the final arguments of tool calls). The lost run loops' abort signals fire,
 so a host ask they still wait on (an approval, a question) is withdrawn instead of taking a later answer, and a
@@ -467,7 +479,8 @@ rerun from the start.
 
 The fake fails fast on wiring mistakes. An `ensure-job` for a kind with no registered handler rejects the transaction,
 as does a foreground `spawn-child` outside a tool call; a call to a tool that is not registered, or to a
-`'parent-only'` tool from a child, returns an error result. Inside `onOpen` on reopen, every port method outside
+`'parent-only'` tool from a child, returns an error result, and `Helpers.message` throws for a run number an idle
+child skipped. Inside `onOpen` on reopen, every port method outside
 `ledger.*`, `turns.stop`, `helpers.stop` and `clock.now` rejects with an error naming it. A script that runs out fails
 the next model request with `script exhausted`. After `close()`, the harness and its ports fail, and its runs stop as at
 a restart: their signals abort, so the host asks they hold are withdrawn, and nothing they do afterwards is written.
