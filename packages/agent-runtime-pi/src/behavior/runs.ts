@@ -56,8 +56,11 @@ export function drain(adapter: Adapter, conv: Conversation): void {
   if (key !== undefined) startRun(adapter, conv, key)
 }
 
-/** Starts a run with submission `key`: a person's text as a prompt, a turn input as its custom message. */
-export function startRun(adapter: Adapter, conv: Conversation, key: string): void {
+/**
+ * Starts run `number` with submission `key`: a person's text as a prompt, a turn input as its custom message. A run
+ * the adapter starts itself takes the next number after the highest started.
+ */
+export function startRun(adapter: Adapter, conv: Conversation, key: string, number = conv.runs + 1): void {
   const native = conv.native
   if (!native) throw new Error(`Conversation ${conv.thread} has no session`)
   const submission = conv.submissions.get(key)!
@@ -65,10 +68,12 @@ export function startRun(adapter: Adapter, conv: Conversation, key: string): voi
   const done = new Promise<void>((resolve) => {
     end = resolve
   })
-  conv.runs += 1
+  // Each number skipped before it belongs to a run that never started: a zero usage entry (H3).
+  while (conv.runUsage.length < number) conv.runUsage.push(ZERO_USAGE)
+  conv.runs = number
   const { input } = submission
   const run: RunState = {
-    run: conv.runs,
+    run: number,
     key,
     after: conv.manager.getLeafId(),
     startedBy: typeof input === 'string' ? undefined : input.kind,
@@ -81,7 +86,6 @@ export function startRun(adapter: Adapter, conv: Conversation, key: string): voi
   }
   conv.active = run
   conv.latest = run
-  conv.runUsage.push(ZERO_USAGE)
   submission.state = 'running'
   submission.run = run.run
   void adapter.track(done)
@@ -230,36 +234,39 @@ export function noteMessage(conv: Conversation, message: MessageEndEvent['messag
 }
 
 /**
- * H3 message: an idle child starts a run with it; a running one takes it as a steer into the run in progress. With
- * `run`, only run `run` may take it: when that is not the active run, it is withdrawn at once. Without `run`, an input
- * that would start a run is withdrawn at once when `ownerAborted` says the call owning the child's first run aborted.
+ * H3 message: an idle child whose runs are all below `run` starts run `run` with it, unless `ownerAborted` says the
+ * call owning the child's first run aborted: then it is withdrawn at once. Otherwise it is a steer only run `run` may
+ * take, withdrawn at once when that is not the active run. A number an idle child skipped (or below 1) throws.
  */
 export function messageChild(
   adapter: Adapter,
   conv: Conversation,
   input: TurnInput,
   key: string,
-  run?: number,
+  run: number,
   ownerAborted = false
 ): MessageResult {
   const existing = conv.submissions.get(key)
   if (existing) return existing.admission as MessageResult
   const active = conv.active
-  if (run !== undefined ? active?.run !== run : !active && ownerAborted) {
-    const admission: MessageResult = { run: run ?? conv.runs + 1, status: 'withdrawn' }
+  const starts = !active && run > conv.runs
+  // An idle child's started runs have all ended; a lower number without an end never started.
+  if (!active && !starts && !conv.ends.has(run)) throw new Error(`Run ${run} of child ${conv.thread} never started`)
+  if (starts ? ownerAborted : active?.run !== run) {
+    const admission: MessageResult = { run, status: 'withdrawn' }
     conv.submissions.set(key, { input, admission, state: 'withdrawn' })
     return admission
   }
   // Nothing is recorded for a child still launching, so the same key can be sent once it has launched.
   if (!conv.native) throw new Error(`Child ${conv.thread} is still launching`)
-  if (!active) {
-    const admission: MessageResult = { run: conv.runs + 1, status: 'started' }
+  if (starts) {
+    const admission: MessageResult = { run, status: 'started' }
     conv.submissions.set(key, { input, admission, state: 'queued' })
     answerOpenCalls(conv)
-    startRun(adapter, conv, key)
+    startRun(adapter, conv, key, run)
     return admission
   }
-  const admission: MessageResult = { run: active.run, status: 'queued' }
+  const admission: MessageResult = { run, status: 'queued' }
   conv.submissions.set(key, { input, admission, state: 'queued' })
   conv.held.push(key)
   return admission
