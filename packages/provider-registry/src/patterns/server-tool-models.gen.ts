@@ -993,7 +993,7 @@ export const PROVIDER_SERVER_TOOL_MODEL_IDS: Readonly<
         endpointTypes: ['openai-chat-completions']
       },
       {
-        ids: ['deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5-2'],
+        ids: ['deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5-2', 'kimi-k3'],
         endpointTypes: ['openai-responses']
       }
     ]
